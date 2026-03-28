@@ -3,9 +3,15 @@ import httpx, os, json
 
 app = FastAPI()
 
+# Configurações do PocketBase (já existentes)
 PB_URL = os.getenv("POCKETBASE_URL", "")
 PB_EMAIL = os.getenv("POCKETBASE_EMAIL", "")
 PB_PASS = os.getenv("POCKETBASE_PASSWORD", "")
+
+# Configurações da Evolution API (novas)
+EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "")   # Ex: http://evolution-api:8080
+EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "")   # Sua chave de API
+EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "") # Nome da instância (se necessário)
 
 async def get_token():
     async with httpx.AsyncClient() as c:
@@ -23,6 +29,7 @@ async def get_token():
 async def health():
     return {"status": "ok"}
 
+# Endpoint existente: recebe webhooks da Evolution e salva no PocketBase
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -73,3 +80,49 @@ async def webhook(request: Request):
 
     print(f"[PB ERROR] {r.status_code}: {r.text}")
     return {"error": "Falha ao salvar"}
+
+# NOVO ENDPOINT: recebe webhooks do PocketBase e envia para a Evolution
+@app.post("/pocketbase-webhook")
+async def pocketbase_webhook(request: Request):
+    try:
+        body = await request.json()
+    except:
+        return {"error": "JSON invalido"}
+
+    # O PocketBase envia um payload com a estrutura: { "record": {...}, "action": "create", ... }
+    # Vamos extrair os campos que você precisa
+    record = body.get("record", {})
+    action = body.get("action", "")
+
+    # Supondo que sua coleção tenha campos "telefone" e "mensagem"
+    telefone = record.get("telefone", "")
+    mensagem = record.get("mensagem", "")
+
+    if not telefone or not mensagem:
+        return {"error": "Campos telefone ou mensagem não encontrados"}
+
+    print(f"[POCKETBASE] Ação: {action} | Telefone: {telefone} | Msg: {mensagem[:50]}")
+
+    # Prepara a chamada para a Evolution API
+    # Ajuste a URL conforme a documentação da Evolution API
+    # Exemplo comum: POST /message/send?instance={instance}
+    evolution_url = f"{EVOLUTION_API_URL}/message/send"
+    headers = {
+        "apikey": EVOLUTION_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "number": telefone,
+        "text": mensagem,
+        # Se precisar de instance, adicione: "instance": EVOLUTION_INSTANCE
+    }
+
+    async with httpx.AsyncClient() as c:
+        response = await c.post(evolution_url, json=payload, headers=headers)
+
+    if response.status_code == 200:
+        print("[EVOLUTION] Mensagem enviada com sucesso")
+        return {"success": True, "evolution_response": response.json()}
+    else:
+        print(f"[EVOLUTION] Erro: {response.status_code} - {response.text}")
+        return {"error": f"Erro ao enviar mensagem: {response.status_code}"}
