@@ -1,0 +1,10 @@
+services:
+  webhook-receiver:
+    build: .
+    restart: unless-stopped
+    expose:
+      - 8000
+    environment:
+      - POCKETBASE_URL=${POCKETBASE_URL}
+      - POCKETBASE_EMAIL=${POCKETBASE_EMAIL}
+      - POCKETBASE_PASSWORD=${POCKETBASE_PASSWORD}
