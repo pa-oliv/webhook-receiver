@@ -89,13 +89,10 @@ async def pocketbase_webhook(request: Request):
     except:
         return {"error": "JSON invalido"}
 
-    # O PocketBase envia um payload com a estrutura: { "record": {...}, "action": "create", ... }
-    # Vamos extrair os campos que você precisa
     record = body.get("record", {})
     action = body.get("action", "")
 
-    # Supondo que sua coleção tenha campos "telefone" e "mensagem"
-    telefone = record.get("telefone", "")
+    telefone = record.get("telefone", "").replace("@s.whatsapp.net", "")
     mensagem = record.get("mensagem", "")
 
     if not telefone or not mensagem:
@@ -103,26 +100,35 @@ async def pocketbase_webhook(request: Request):
 
     print(f"[POCKETBASE] Ação: {action} | Telefone: {telefone} | Msg: {mensagem[:50]}")
 
-    # Prepara a chamada para a Evolution API
-    # Ajuste a URL conforme a documentação da Evolution API
-    # Exemplo comum: POST /message/send?instance={instance}
-    evolution_url = f"{EVOLUTION_API_URL}/message/send"
+    # URL correta para Evolution API v2
+    evolution_url = f"{EVOLUTION_API_URL}/message/sendText/{EVOLUTION_INSTANCE}"
+    
     headers = {
         "apikey": EVOLUTION_API_KEY,
         "Content-Type": "application/json"
     }
+    
+    # Garante que o número está no formato correto (só dígitos)
+    numero_limpo = ''.join(filter(str.isdigit, telefone))
+    
     payload = {
-        "number": telefone,
-        "text": mensagem,
-        # Se precisar de instance, adicione: "instance": EVOLUTION_INSTANCE
+        "number": numero_limpo,
+        "text": mensagem
     }
 
-    async with httpx.AsyncClient() as c:
-        response = await c.post(evolution_url, json=payload, headers=headers)
+    print(f"[DEBUG] URL: {evolution_url}")
+    print(f"[DEBUG] Número: {numero_limpo}")
 
-    if response.status_code == 200:
-        print("[EVOLUTION] Mensagem enviada com sucesso")
-        return {"success": True, "evolution_response": response.json()}
-    else:
-        print(f"[EVOLUTION] Erro: {response.status_code} - {response.text}")
-        return {"error": f"Erro ao enviar mensagem: {response.status_code}"}
+    async with httpx.AsyncClient() as c:
+        try:
+            response = await c.post(evolution_url, json=payload, headers=headers, timeout=10.0)
+            
+            if response.status_code == 200 or response.status_code == 201:
+                print("[EVOLUTION] Mensagem enviada com sucesso")
+                return {"success": True, "evolution_response": response.json()}
+            else:
+                print(f"[EVOLUTION] Erro: {response.status_code} - {response.text}")
+                return {"error": f"Erro ao enviar mensagem: {response.status_code}", "details": response.text}
+        except Exception as e:
+            print(f"[EVOLUTION] Exceção: {str(e)}")
+            return {"error": f"Exceção ao conectar: {str(e)}"}
