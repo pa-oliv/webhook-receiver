@@ -119,6 +119,10 @@ async def pocketbase_webhook(request: Request):
     print(f"[DEBUG] URL: {evolution_url}")
     print(f"[DEBUG] Número: {numero_limpo}")
 
+    # Adicione ANTES do try/except do httpx:
+    print(f"[DEBUG] Headers: {headers}")
+    print(f"[DEBUG] Payload: {json.dumps(payload, indent=2)}")
+
     async with httpx.AsyncClient() as c:
         try:
             response = await c.post(evolution_url, json=payload, headers=headers, timeout=10.0)
