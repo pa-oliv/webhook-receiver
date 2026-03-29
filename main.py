@@ -1,138 +1,146 @@
+cat > /etc/dokploy/compose/programa-webhookreceiver-xoqzsc/code/main.py << 'EOF'
 from fastapi import FastAPI, Request
-import httpx, os, json
+import os
+import json
+import urllib.request
+import urllib.error
 
 app = FastAPI()
 
-# Configurações do PocketBase (já existentes)
-PB_URL = os.getenv("POCKETBASE_URL", "")
-PB_EMAIL = os.getenv("POCKETBASE_EMAIL", "")
-PB_PASS = os.getenv("POCKETBASE_PASSWORD", "")
+# Configurações
+PB_URL = os.getenv("POCKETBASE_URL")
+PB_EMAIL = os.getenv("POCKETBASE_EMAIL")
+PB_PASSWORD = os.getenv("POCKETBASE_PASSWORD")
+ZEROCLAW_TOKEN = os.getenv("ZEROCLAW_TOKEN")
+ZEROCLAW_URL = "http://10.0.1.13:42617"
 
-# Configurações da Evolution API (novas)
-EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "")   # Ex: http://evolution-api:8080
-EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "")   # Sua chave de API
-EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "") # Nome da instância (se necessário)
-
-async def get_token():
-    async with httpx.AsyncClient() as c:
-        r = await c.post(
+def authenticate_pocketbase():
+    """Autentica no PocketBase e retorna o token"""
+    try:
+        data = json.dumps({
+            "identity": PB_EMAIL,
+            "password": PB_PASSWORD
+        }).encode()
+        
+        req = urllib.request.Request(
             f"{PB_URL}/api/collections/_superusers/auth-with-password",
-            json={"identity": PB_EMAIL, "password": PB_PASS}
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST"
         )
-        if r.status_code == 200:
-            print("[AUTH OK]")
-            return r.json()["token"]
-        print(f"[AUTH FAIL] {r.status_code}")
+        
+        response = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(response.read().decode())
+        print("[AUTH OK]")
+        return result.get("token")
+    except Exception as e:
+        print(f"[AUTH FAIL] {e}")
         return None
 
-@app.get("/health")
-async def health():
+def save_to_pocketbase(token, phone, message, message_type="text"):
+    """Salva mensagem no PocketBase"""
+    try:
+        data = json.dumps({
+            "telefone": phone,
+            "conteudo": message,
+            "tipo": message_type
+        }).encode()
+        
+        req = urllib.request.Request(
+            f"{PB_URL}/api/collections/mensagens/records",
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": token
+            },
+            method="POST"
+        )
+        
+        response = urllib.request.urlopen(req, timeout=10)
+        result = json.loads(response.read().decode())
+        record_id = result.get("id")
+        print(f"[SAVED] {record_id}")
+        return record_id
+    except Exception as e:
+        print(f"[SAVE FAIL] {e}")
+        return None
+
+def ask_zeroclaw(message):
+    """Envia mensagem para ZeroClaw e retorna resposta da IA"""
+    try:
+        data = json.dumps({"message": message}).encode()
+        
+        req = urllib.request.Request(
+            f"{ZEROCLAW_URL}/webhook",
+            data=data,
+            headers={
+                "Authorization": f"Bearer {ZEROCLAW_TOKEN}",
+                "Content-Type": "application/json"
+            },
+            method="POST"
+        )
+        
+        response = urllib.request.urlopen(req, timeout=30)
+        result = json.loads(response.read().decode())
+        ai_response = result.get("response", "")
+        print(f"[ZEROCLAW OK] {len(ai_response)} caracteres")
+        return ai_response
+    except Exception as e:
+        print(f"[ZEROCLAW FAIL] {e}")
+        return None
+
+@app.post("/webhook")
+async def receive_webhook(request: Request):
+    body = await request.json()
+    event = body.get("event")
+    
+    # Ignorar eventos irrelevantes
+    if event in ["connection.update", "contacts.update"]:
+        print(f"[IGNORADO] evento: {event}")
+        return {"ignored": True, "event": event}
+    
+    print(f"[WEBHOOK] {event}")
+    
+    # Processar apenas messages.upsert
+    if event == "messages.upsert":
+        try:
+            msg_data = body["data"]["messages"][0]
+            phone = msg_data["key"]["remoteJid"].split("@")[0]
+            
+            # Detectar tipo de mensagem
+            if "conversation" in msg_data["message"]:
+                message = msg_data["message"]["conversation"]
+                msg_type = "text"
+            elif "extendedTextMessage" in msg_data["message"]:
+                message = msg_data["message"]["extendedTextMessage"]["text"]
+                msg_type = "text"
+            else:
+                message = "[midia]"
+                msg_type = "media"
+            
+            print(f"[MSG] recebida | {phone} | {message}")
+            
+            # 1. Salvar no PocketBase
+            token = authenticate_pocketbase()
+            if token:
+                save_to_pocketbase(token, phone, message, msg_type)
+            
+            # 2. Processar com ZeroClaw (APENAS SE FOR TEXTO)
+            if msg_type == "text" and message != "[midia]":
+                ai_response = ask_zeroclaw(message)
+                if ai_response:
+                    print(f"[IA RESPOSTA] {ai_response[:100]}...")  # Mostra só primeiros 100 chars
+                    # TODO: Aqui vai enviar para WhatsApp depois
+            
+            return {"status": "processed"}
+            
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            return {"error": str(e)}
+    
     return {"status": "ok"}
 
-# Endpoint existente: recebe webhooks da Evolution e salva no PocketBase
-@app.post("/webhook")
-async def webhook(request: Request):
-    try:
-        body = await request.json()
-    except:
-        return {"error": "JSON invalido"}
-
-    event = body.get("event", "unknown")
-    data = body.get("data", {})
-    key = data.get("key", {})
-    message = data.get("message", {})
-
-    telefone = key.get("remoteJid", "").replace("@s.whatsapp.net", "")
-    from_me = key.get("fromMe", False)
-    tipo = "enviada" if from_me else "recebida"
-    texto = (
-        message.get("conversation")
-        or message.get("extendedTextMessage", {}).get("text")
-        or "[midia]"
-    )
-
-    print(f"[WEBHOOK] {event}")
-    print(f"[MSG] {tipo} | {telefone} | {texto[:50]}")
-
-    token = await get_token()
-    if not token:
-        return {"error": "Auth falhou"}
-
-    record = {
-        "telefone": telefone,
-        "mensagem": texto,
-        "tipo": tipo,
-        "evento": event,
-        "payload_raw": json.dumps(body)[:2000]
-    }
-
-    async with httpx.AsyncClient() as c:
-        r = await c.post(
-            f"{PB_URL}/api/collections/mensagens/records",
-            json=record,
-            headers={"Authorization": f"Bearer {token}"}
-        )
-
-    if r.status_code in [200, 201]:
-        rid = r.json().get("id", "?")
-        print(f"[SAVED] {rid}")
-        return {"success": True, "record_id": rid}
-
-    print(f"[PB ERROR] {r.status_code}: {r.text}")
-    return {"error": "Falha ao salvar"}
-
-# NOVO ENDPOINT: recebe webhooks do PocketBase e envia para a Evolution
-@app.post("/pocketbase-webhook")
-async def pocketbase_webhook(request: Request):
-    try:
-        body = await request.json()
-    except:
-        return {"error": "JSON invalido"}
-
-    record = body.get("record", {})
-    action = body.get("action", "")
-
-    telefone = record.get("telefone", "").replace("@s.whatsapp.net", "")
-    mensagem = record.get("mensagem", "")
-
-    if not telefone or not mensagem:
-        return {"error": "Campos telefone ou mensagem não encontrados"}
-
-    print(f"[POCKETBASE] Ação: {action} | Telefone: {telefone} | Msg: {mensagem[:50]}")
-
-    # URL correta para Evolution API v2
-    evolution_url = f"{EVOLUTION_API_URL}/message/sendText/{EVOLUTION_INSTANCE}"
-    
-    headers = {
-        "apikey": EVOLUTION_API_KEY,
-        "Content-Type": "application/json"
-    }
-    
-    # Garante que o número está no formato correto (só dígitos)
-    numero_limpo = ''.join(filter(str.isdigit, telefone))
-    
-    payload = {
-        "number": numero_limpo,
-        "text": mensagem
-    }
-
-    print(f"[DEBUG] URL: {evolution_url}")
-    print(f"[DEBUG] Número: {numero_limpo}")
-
-    # Adicione ANTES do try/except do httpx:
-    print(f"[DEBUG] Headers: {headers}")
-    print(f"[DEBUG] Payload: {json.dumps(payload, indent=2)}")
-
-    async with httpx.AsyncClient() as c:
-        try:
-            response = await c.post(evolution_url, json=payload, headers=headers, timeout=10.0)
-            
-            if response.status_code == 200 or response.status_code == 201:
-                print("[EVOLUTION] Mensagem enviada com sucesso")
-                return {"success": True, "evolution_response": response.json()}
-            else:
-                print(f"[EVOLUTION] Erro: {response.status_code} - {response.text}")
-                return {"error": f"Erro ao enviar mensagem: {response.status_code}", "details": response.text}
-        except Exception as e:
-            print(f"[EVOLUTION] Exceção: {str(e)}")
-            return {"error": f"Exceção ao conectar: {str(e)}"}
+@app.get("/")
+def read_root():
+    return {"status": "webhook-receiver running", "zeroclaw": "integrated"}
+EOF
